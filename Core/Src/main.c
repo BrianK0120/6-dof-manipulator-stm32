@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,10 +41,10 @@
 #define EN_PIN    GPIO_PIN_0
 
 // DIR/STEP pins
-#define JOINT0_DIR_PORT   GPIOC
-#define JOINT0_DIR_PIN    GPIO_PIN_0
-#define JOINT0_STEP_TIM   htim2
-#define JOINT0_STEP_CH    TIM_CHANNEL_2
+#define JOINT0_DIR_PORT   GPIOA             // PLACEHOLDER
+#define JOINT0_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT0_STEP_TIM   htim5             // PLACEHOLDER - TIM3 fully used by joints 1-4
+#define JOINT0_STEP_CH    TIM_CHANNEL_1     // PLACEHOLDER
 
 #define JOINT1_DIR_PORT   GPIOA             // PLACEHOLDER (TMC5160)
 #define JOINT1_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
@@ -65,16 +66,16 @@
 #define JOINT4_STEP_TIM   htim3             // PLACEHOLDER
 #define JOINT4_STEP_CH    TIM_CHANNEL_4     // PLACEHOLDER
 
-#define JOINT5_DIR_PORT   GPIOA             // PLACEHOLDER
-#define JOINT5_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
-#define JOINT5_STEP_TIM   htim5             // PLACEHOLDER - TIM3 fully used by joints 1-4
-#define JOINT5_STEP_CH    TIM_CHANNEL_1     // PLACEHOLDER
+#define JOINT5_DIR_PORT   GPIOC
+#define JOINT5_DIR_PIN    GPIO_PIN_0
+#define JOINT5_STEP_TIM   htim2
+#define JOINT5_STEP_CH    TIM_CHANNEL_2
 
 // UART for TMC2209
 #define TMC_UART1_TX_PORT  GPIOA
-#define TMC_UART1_TX_PIN   GPIO_PIN_9       // CONFIRMED (USART1_TX)
+#define TMC_UART1_TX_PIN   GPIO_PIN_9
 #define TMC_UART1_RX_PORT  GPIOA
-#define TMC_UART1_RX_PIN   GPIO_PIN_10      // CONFIRMED (USART1_RX)
+#define TMC_UART1_RX_PIN   GPIO_PIN_10
 
 #define TMC_UART2_TX_PORT  GPIOA            // PLACEHOLDER - not generated in CubeMX yet
 #define TMC_UART2_TX_PIN   GPIO_PIN_0       // PLACEHOLDER
@@ -82,19 +83,19 @@
 #define TMC_UART2_RX_PIN   GPIO_PIN_0       // PLACEHOLDER
 
 // UART Bus and Slave Addresses
-#define JOINT0_UART_BUS     1
+#define JOINT0_UART_BUS     2
 #define JOINT0_SLAVE_ADDR   0
 
-#define JOINT2_UART_BUS     2                // PLACEHOLDER
+#define JOINT2_UART_BUS     1                // PLACEHOLDER
 #define JOINT2_SLAVE_ADDR   0                // PLACEHOLDER
 
-#define JOINT3_UART_BUS     2                // PLACEHOLDER
+#define JOINT3_UART_BUS     1                // PLACEHOLDER
 #define JOINT3_SLAVE_ADDR   1                // PLACEHOLDER
 
-#define JOINT4_UART_BUS     2                // PLACEHOLDER
+#define JOINT4_UART_BUS     1                // PLACEHOLDER
 #define JOINT4_SLAVE_ADDR   2                // PLACEHOLDER
 
-#define JOINT5_UART_BUS     2                // PLACEHOLDER
+#define JOINT5_UART_BUS     1                // PLACEHOLDER
 #define JOINT5_SLAVE_ADDR   3                // PLACEHOLDER
 
 // SPI for TMC5160
@@ -144,6 +145,22 @@
 #define HALL5_PORT    GPIOA                 // PLACEHOLDER
 #define HALL5_PIN     GPIO_PIN_0            // PLACEHOLDER
 
+// Joint gear ratios
+#define JOINT0_GEAR_RATIO   200.0f/30.0f
+#define JOINT1_GEAR_RATIO   25.0f
+#define JOINT2_GEAR_RATIO   ((16.0f*6.0f) / (14.0f*2.0f)) * ((16.0f*6.0f) / 16.0f)
+#define JOINT3_GEAR_RATIO   5.5f
+#define JOINT4_GEAR_RATIO   4.0f
+#define JOINT5_GEAR_RATIO   1.0f
+
+// Joint microsteps
+#define JOINT0_MICROSTEPS   256             // CONFIRMED (matches Stepper_UART_Config's MRES=0)
+#define JOINT1_MICROSTEPS   256
+#define JOINT2_MICROSTEPS   256
+#define JOINT3_MICROSTEPS   256
+#define JOINT4_MICROSTEPS   256
+#define JOINT5_MICROSTEPS   256
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -180,64 +197,134 @@ void Set_Servo_Angle(TIM_HandleTypeDef *htim, uint32_t channel, uint8_t angle){
 }
 // SERVO END
 
-// TMC2209 STEP/DIR BEGIN
-// DIR  -> PC0
-// EN   -> PB0  (TMC2209 ENN pin is ACTIVE-LOW: LOW = driver enabled)
-// STEP -> TIM2 CH2 (PWM output, one rising edge per microstep)
+// JOINT STEP/DIR/EN BEGIN
+#define MOTOR_FULL_STEPS_PER_REV  200.0f   // 1.8deg/step across the board for the NEMA 17s and the 23
 
-void Stepper_Enable(uint8_t enable){
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
+typedef struct {
+    GPIO_TypeDef      *dir_port;
+    uint16_t           dir_pin;
+    TIM_HandleTypeDef *step_tim;   // NULL until this joint's timer is generated in CubeMX
+    uint32_t           step_ch;
+    float              gear_ratio;
+    uint16_t           microsteps;
+    uint8_t            configured; // 1 = real hardware, 0 = placeholder (calls no-op)
+} JointConfig;
+
+static JointConfig joint_cfg[NUM_JOINTS] = {
+    // Joint 0
+    { JOINT0_DIR_PORT, JOINT0_DIR_PIN, NULL, JOINT0_STEP_CH,
+      JOINT0_GEAR_RATIO, JOINT0_MICROSTEPS, 0 },
+    // Joint 1 (TMC5160)
+    { JOINT1_DIR_PORT, JOINT1_DIR_PIN, NULL, JOINT1_STEP_CH,
+      JOINT1_GEAR_RATIO, JOINT1_MICROSTEPS, 0 },
+    // Joint 2
+    { JOINT2_DIR_PORT, JOINT2_DIR_PIN, NULL, JOINT2_STEP_CH,
+      JOINT2_GEAR_RATIO, JOINT2_MICROSTEPS, 0 },
+    // Joint 3
+    { JOINT3_DIR_PORT, JOINT3_DIR_PIN, NULL, JOINT3_STEP_CH,
+      JOINT3_GEAR_RATIO, JOINT3_MICROSTEPS, 0 },
+    // Joint 4
+    { JOINT4_DIR_PORT, JOINT4_DIR_PIN, NULL, JOINT4_STEP_CH,
+      JOINT4_GEAR_RATIO, JOINT4_MICROSTEPS, 0 },
+    // Joint 5
+    { JOINT5_DIR_PORT, JOINT5_DIR_PIN, &JOINT5_STEP_TIM, JOINT5_STEP_CH,
+      JOINT5_GEAR_RATIO, JOINT5_MICROSTEPS, 1 },
+};
+
+void Joint_Enable(uint8_t enable){
+	// Active-low EN
+    HAL_GPIO_WritePin(EN_PORT, EN_PIN, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
-void Stepper_SetDirection(uint8_t dir){
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
-
-void Stepper_Run(uint8_t run){
-    if (run)
-    {
-        HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+void Joint_SetDirection(uint8_t joint, uint8_t dir){
+	// REMEMBER TO GET RID OF THE !joint_cfg[joint[.configure LATER WHEN EVERYTHING IS PROPERLY CONFIGURED (waste of calcs)!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    if (joint >= NUM_JOINTS || !joint_cfg[joint].configured){
+    	return;
     }
-    else
-    {
-        HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_2);
+
+    HAL_GPIO_WritePin(joint_cfg[joint].dir_port, joint_cfg[joint].dir_pin, dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+void Joint_Run(uint8_t joint, uint8_t run){
+    if (joint >= NUM_JOINTS || !joint_cfg[joint].configured){
+    	return;
+    }
+
+    if (run){
+    	HAL_TIM_PWM_Start(joint_cfg[joint].step_tim, joint_cfg[joint].step_ch);
+    } else{
+    	HAL_TIM_PWM_Stop(joint_cfg[joint].step_tim, joint_cfg[joint].step_ch);
     }
 }
 
-// Change step rate on the fly. htim2 clocks at 1 MHz (84MHz / 84 prescaler),
-// so step_freq_hz can range roughly 1 Hz - a few hundred kHz depending on driver limits.
-void Stepper_SetStepFrequency(uint32_t step_freq_hz)
-{
-    if (step_freq_hz == 0) return;
+// Sets STEP pulse frequency directly.
+void Joint_SetStepFrequency(uint8_t joint, uint32_t step_freq_hz){
+    if (joint >= NUM_JOINTS || !joint_cfg[joint].configured || step_freq_hz == 0){
+    	return;
+    }
+
     uint32_t period = (1000000U / step_freq_hz);
-    if (period < 2) period = 2; // keep a valid duty cycle
-    __HAL_TIM_SET_AUTORELOAD(&htim2, period - 1);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, period / 2); // ~50% duty
+    if (period < 2){
+    	period = 2; // keep a valid duty cycle
+    }
+
+    __HAL_TIM_SET_AUTORELOAD(joint_cfg[joint].step_tim, period - 1);
+    __HAL_TIM_SET_COMPARE(joint_cfg[joint].step_tim, joint_cfg[joint].step_ch, period / 2);
 }
-// TMC2209 STEP/DIR END
 
-// TMC2209 UART CONFIG BEGIN
-// Single-wire UART on PA2(TX)/PA3(RX), driver address 0 (MS1=MS2=GND)
+// Drives a joint at a given OUTPUT SHAFT speed (deg/s, sign sets direction)
+void Joint_MoveAtSpeed(uint8_t joint, float output_deg_per_sec){
+    if (joint >= NUM_JOINTS || !joint_cfg[joint].configured){
+    	return;
+    }
 
-// !!! SET THIS to your driver's sense resistor value (ohms). Common TMC2209
-// breakout boards (BTT/FYSETC/Watterott) use 0.11 ohm - check your board's
-// silkscreen/datasheet, this directly scales the current calculation below.
+    // Stop the joint
+    if (output_deg_per_sec == 0.0f){
+        Joint_Run(joint, 0);
+        return;
+    }
+
+    // Joint specific speed
+    float steps_per_output_rev = MOTOR_FULL_STEPS_PER_REV * (float)joint_cfg[joint].microsteps * joint_cfg[joint].gear_ratio;
+    float output_rev_per_sec = fabsf(output_deg_per_sec) / 360.0f;
+    uint32_t step_freq_hz = (uint32_t)(output_rev_per_sec * steps_per_output_rev);
+
+    Joint_SetDirection(joint, output_deg_per_sec > 0 ? 1 : 0);
+    Joint_SetStepFrequency(joint, step_freq_hz);
+    Joint_Run(joint, 1);
+}
+// JOINT STEP/DIR/EN END
+
+// TMC2209 UART
+static UART_HandleTypeDef *tmc_uart_bus[3] = { NULL, &huart1, NULL }; // [1]=bus1, [2]=bus2, [0] unused
 #define TMC_RSENSE      0.11f
 #define TMC_VSENSE_BIT  0        // 0 = Vfs 0.325V (normal), 1 = Vfs 0.180V (more res, less headroom)
-#define TMC_SLAVE_ADDR  0x00     // MS1=MS2=GND -> address 0
 
 #define TMC_REG_GCONF      0x00
 #define TMC_REG_IHOLD_IRUN 0x10
 #define TMC_REG_CHOPCONF   0x6C
 
-static uint8_t TMC_CalcCRC(uint8_t *datagram, uint8_t len)
-{
+typedef struct {
+    uint8_t bus;         // 1 or 2 (index into tmc_uart_bus), 0 = not UART-driven (TMC5160)
+    uint8_t slave_addr;  // 0-3, set via that driver's MS1/MS2
+    float   current_a;
+    uint8_t configured;  // 1 = physically wired right now, DELETE THIS LATER ON ASWELLL!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+} TMC2209_JointConfig;
+
+static TMC2209_JointConfig tmc2209_cfg[NUM_JOINTS] = {
+    { JOINT0_UART_BUS, JOINT0_SLAVE_ADDR, JOINT0_CURRENT_A, 0 },
+    { 0,               0,                 JOINT1_CURRENT_A, 0 }, // joint 1 = TMC5160, not UART
+    { JOINT2_UART_BUS, JOINT2_SLAVE_ADDR, JOINT2_CURRENT_A, 0 },
+    { JOINT3_UART_BUS, JOINT3_SLAVE_ADDR, JOINT3_CURRENT_A, 0 },
+    { JOINT4_UART_BUS, JOINT4_SLAVE_ADDR, JOINT4_CURRENT_A, 0 },
+    { JOINT5_UART_BUS, JOINT5_SLAVE_ADDR, JOINT5_CURRENT_A, 1 }, // CONFIRMED - testing this joint now
+};
+
+static uint8_t TMC_CalcCRC(uint8_t *datagram, uint8_t len){
     uint8_t crc = 0;
-    for (uint8_t i = 0; i < len; i++)
-    {
+    for (uint8_t i = 0; i < len; i++){
         uint8_t currentByte = datagram[i];
-        for (uint8_t j = 0; j < 8; j++)
-        {
+        for (uint8_t j = 0; j < 8; j++){
             if ((crc >> 7) ^ (currentByte & 0x01))
                 crc = (uint8_t)((crc << 1) ^ 0x07);
             else
@@ -248,35 +335,29 @@ static uint8_t TMC_CalcCRC(uint8_t *datagram, uint8_t len)
     return crc;
 }
 
-// Reads one byte by polling the RXNE flag directly instead of HAL_UART_Receive -
-// proven reliable in testing where HAL_UART_Receive was flaky on this setup.
-// Reading SR (via the flag check) then DR also auto-clears any ORE/FE/NE error.
-static HAL_StatusTypeDef TMC_ReceiveByte(uint8_t *byte, uint32_t timeout_ms)
-{
+static HAL_StatusTypeDef TMC_ReceiveByte(UART_HandleTypeDef *huart, uint8_t *byte, uint32_t timeout_ms){
     uint32_t start = HAL_GetTick();
-    while (!__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE))
-    {
-        if ((HAL_GetTick() - start) > timeout_ms) return HAL_TIMEOUT;
+    while (!__HAL_UART_GET_FLAG(huart, UART_FLAG_RXNE)){
+        if ((HAL_GetTick() - start) > timeout_ms){
+        	return HAL_TIMEOUT;
+        }
     }
-    *byte = (uint8_t)(huart1.Instance->DR);
+    *byte = (uint8_t)(huart->Instance->DR);
     return HAL_OK;
 }
 
-static HAL_StatusTypeDef TMC_ReceiveBytes(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
-{
-    for (uint16_t i = 0; i < len; i++)
-    {
-        if (TMC_ReceiveByte(&buf[i], timeout_ms) != HAL_OK) return HAL_TIMEOUT;
+static HAL_StatusTypeDef TMC_ReceiveBytes(UART_HandleTypeDef *huart, uint8_t *buf, uint16_t len, uint32_t timeout_ms){
+    for (uint16_t i = 0; i < len; i++){
+        if (TMC_ReceiveByte(huart, &buf[i], timeout_ms) != HAL_OK) return HAL_TIMEOUT;
     }
     return HAL_OK;
 }
 
 // Builds and sends the 8-byte write datagram: sync, addr, reg|write, 4 data bytes MSB-first, crc
-static void TMC_WriteRegister(uint8_t reg, uint32_t data)
-{
+static void TMC_WriteRegister(UART_HandleTypeDef *huart, uint8_t addr, uint8_t reg, uint32_t data){
     uint8_t datagram[8];
     datagram[0] = 0x05; // sync byte
-    datagram[1] = TMC_SLAVE_ADDR;
+    datagram[1] = addr;
     datagram[2] = reg | 0x80; // write bit set
     datagram[3] = (uint8_t)(data >> 24);
     datagram[4] = (uint8_t)(data >> 16);
@@ -284,29 +365,28 @@ static void TMC_WriteRegister(uint8_t reg, uint32_t data)
     datagram[6] = (uint8_t)(data);
     datagram[7] = TMC_CalcCRC(datagram, 7);
 
-    HAL_UART_Transmit(&huart1, datagram, 8, 10);
+    HAL_UART_Transmit(huart, datagram, 8, 10);
     // this 8-byte datagram echoes back on RX since TX/RX are tied together -
     // flush it before reading the driver's actual reply (see TMC_ReadRegister)
     uint8_t echo[8];
-    TMC_ReceiveBytes(echo, 8, 50);
+    TMC_ReceiveBytes(huart, echo, 8, 50);
 }
 
 // Reads a register back so you can VERIFY a write actually took effect.
 // Returns 1 on success (valid reply + good CRC) and fills *data_out.
-static uint8_t TMC_ReadRegister(uint8_t reg, uint32_t *data_out)
-{
+static uint8_t TMC_ReadRegister(UART_HandleTypeDef *huart, uint8_t addr, uint8_t reg, uint32_t *data_out){
     uint8_t request[4];
     request[0] = 0x05;
-    request[1] = TMC_SLAVE_ADDR;
+    request[1] = addr;
     request[2] = reg & 0x7F; // read bit clear
     request[3] = TMC_CalcCRC(request, 3);
 
     uint8_t echo[4];
-    HAL_UART_Transmit(&huart1, request, 4, 10);
-    TMC_ReceiveBytes(echo, 4, 50); // flush the 4-byte echo of our own request
+    HAL_UART_Transmit(huart, request, 4, 10);
+    TMC_ReceiveBytes(huart, echo, 4, 50); // flush the 4-byte echo of our own request
 
     uint8_t reply[8];
-    if (TMC_ReceiveBytes(reply, 8, 50) != HAL_OK)
+    if (TMC_ReceiveBytes(huart, reply, 8, 50) != HAL_OK)
         return 0; // timed out - no reply came back (check wiring/resistor/baud)
 
     if (TMC_CalcCRC(reply, 7) != reply[7])
@@ -318,8 +398,7 @@ static uint8_t TMC_ReadRegister(uint8_t reg, uint32_t *data_out)
 }
 
 // Converts a desired RMS run current (amps) into the 5-bit IRUN current-scale value (0-31)
-static uint8_t TMC_CurrentToCS(float irun_amps)
-{
+static uint8_t TMC_CurrentToCS(float irun_amps){
     float vfs = TMC_VSENSE_BIT ? 0.180f : 0.325f;
     float cs = (irun_amps * 32.0f * 1.41421356f * (TMC_RSENSE + 0.02f) / vfs) - 1.0f;
     if (cs < 0) cs = 0;
@@ -327,42 +406,162 @@ static uint8_t TMC_CurrentToCS(float irun_amps)
     return (uint8_t)(cs + 0.5f);
 }
 
-// Reads CHOPCONF back and checks MRES/en_spreadcycle actually match what we wrote.
-// Returns 1 if config verified good, 0 if the read failed or values don't match.
-uint8_t Stepper_UART_VerifyConfig(void)
-{
-    uint32_t chopconf = 0, gconf = 0;
-    if (!TMC_ReadRegister(TMC_REG_CHOPCONF, &chopconf)) return 0;
-    if (!TMC_ReadRegister(TMC_REG_GCONF, &gconf)) return 0;
+// Configures one TMC2209 joint over UART: SpreadCycle, finest microstepping, run current.
+void TMC2209_ConfigJoint(uint8_t joint){
+    if (joint >= NUM_JOINTS || !tmc2209_cfg[joint].configured) return;
+    UART_HandleTypeDef *huart = tmc_uart_bus[tmc2209_cfg[joint].bus];
+    if (huart == NULL) return; // that bus isn't wired/generated yet
+    uint8_t addr = tmc2209_cfg[joint].slave_addr;
 
-    uint32_t mres = (chopconf >> 24) & 0x0F;
-    uint32_t en_spreadcycle = (gconf >> 2) & 0x01;
-
-    return (mres == 0) && (en_spreadcycle == 1);
-}
-
-void Stepper_UART_Config(void)
-{
     // GCONF: pdn_disable=1 (required for UART control), mstep_reg_select=1
-    // (CHOPCONF.MRES sets microstepping, overriding the grounded MS1/MS2 pins),
+    // (CHOPCONF.MRES sets microstepping, overriding the MS1/MS2 pins),
     // en_spreadcycle=1 -> SpreadCycle (robot arm: better torque/accuracy under
     // load and less chance of missed steps than StealthChop, at the cost of noise)
     uint32_t gconf = (1UL << 6) | (1UL << 7) | (1UL << 2);
-    TMC_WriteRegister(TMC_REG_GCONF, gconf);
+    TMC_WriteRegister(huart, addr, TMC_REG_GCONF, gconf);
 
     // CHOPCONF: MRES=0000 -> 1/256 microstepping (finest), INTPOL=1 (interpolate
     // to 256 steps internally for smoothness), plus standard chopper timing bits
     uint32_t toff = 3, hstrt = 5, hend = 2, tbl = 2, mres = 0, intpol = 1;
     uint32_t chopconf = (toff << 0) | (hstrt << 4) | (hend << 7) | (tbl << 15)
                        | ((uint32_t)TMC_VSENSE_BIT << 17) | (mres << 24) | (intpol << 28);
-    TMC_WriteRegister(TMC_REG_CHOPCONF, chopconf);
+    TMC_WriteRegister(huart, addr, TMC_REG_CHOPCONF, chopconf);
 
-    // IHOLD_IRUN: run current = 1.2A, hold current = 50% of run (reduces heat when idle)
-    uint8_t irun_cs  = TMC_CurrentToCS(1.2f);
-    uint8_t ihold_cs = TMC_CurrentToCS(0.6f);
+    // IHOLD_IRUN: run current from that joint's config, hold current = 50% of run
+    uint8_t irun_cs  = TMC_CurrentToCS(tmc2209_cfg[joint].current_a);
+    uint8_t ihold_cs = TMC_CurrentToCS(tmc2209_cfg[joint].current_a * 0.5f);
     uint32_t ihold_irun = ((uint32_t)ihold_cs << 0) | ((uint32_t)irun_cs << 8) | (4UL << 16); // IHOLDDELAY=4
-    TMC_WriteRegister(TMC_REG_IHOLD_IRUN, ihold_irun);
+    TMC_WriteRegister(huart, addr, TMC_REG_IHOLD_IRUN, ihold_irun);
 }
+
+// Reads CHOPCONF/GCONF back and checks MRES/en_spreadcycle actually match what we wrote.
+uint8_t TMC2209_VerifyJoint(uint8_t joint){
+    if (joint >= NUM_JOINTS || !tmc2209_cfg[joint].configured) return 0;
+    UART_HandleTypeDef *huart = tmc_uart_bus[tmc2209_cfg[joint].bus];
+    if (huart == NULL) return 0;
+    uint8_t addr = tmc2209_cfg[joint].slave_addr;
+
+    uint32_t chopconf = 0, gconf = 0;
+    if (!TMC_ReadRegister(huart, addr, TMC_REG_CHOPCONF, &chopconf)) return 0;
+    if (!TMC_ReadRegister(huart, addr, TMC_REG_GCONF, &gconf)) return 0;
+
+    uint32_t mres = (chopconf >> 24) & 0x0F;
+    uint32_t en_spreadcycle = (gconf >> 2) & 0x01;
+    return (mres == 0) && (en_spreadcycle == 1);
+}
+
+// TMC5160 SPI
+// TMC5160 uses a 5-byte (40-bit) datagram: [addr|RW][data3][data2][data1][data0].
+// Reads are delayed by one transaction on this chip - the data you want comes back
+// on the NEXT transfer, not the one that requested it - see TMC5160_ReadRegister.
+// NOTE: won't compile until you add an SPI peripheral in CubeMX - SPI_HandleTypeDef
+// doesn't exist in this project until that HAL module is enabled.
+
+#define TMC5160_REG_GCONF        0x00
+#define TMC5160_REG_GLOBALSCALER 0x0B
+#define TMC5160_REG_IHOLD_IRUN   0x10
+#define TMC5160_REG_CHOPCONF     0x6C
+
+//static void TMC5160_CS(GPIO_TypeDef *cs_port, uint16_t cs_pin, uint8_t active){
+//    HAL_GPIO_WritePin(cs_port, cs_pin, active ? GPIO_PIN_RESET : GPIO_PIN_SET);
+//}
+//
+//static void TMC5160_WriteRegister(SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port, uint16_t cs_pin, uint8_t reg, uint32_t data){
+//    uint8_t tx[5], rx[5];
+//    tx[0] = reg | 0x80;
+//    tx[1] = (uint8_t)(data >> 24);
+//    tx[2] = (uint8_t)(data >> 16);
+//    tx[3] = (uint8_t)(data >> 8);
+//    tx[4] = (uint8_t)(data);
+//
+//    TMC5160_CS(cs_port, cs_pin, 1);
+//    HAL_SPI_TransmitReceive(hspi, tx, rx, 5, 10);
+//    TMC5160_CS(cs_port, cs_pin, 0);
+//}
+//
+//static uint8_t TMC5160_ReadRegister(SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port, uint16_t cs_pin, uint8_t reg, uint32_t *data_out){
+//    uint8_t tx[5] = { (uint8_t)(reg & 0x7F), 0, 0, 0, 0 };
+//    uint8_t rx[5];
+//
+//    // first transfer just requests the register - its rx data is stale/irrelevant
+//    TMC5160_CS(cs_port, cs_pin, 1);
+//    if (HAL_SPI_TransmitReceive(hspi, tx, rx, 5, 10) != HAL_OK) { TMC5160_CS(cs_port, cs_pin, 0); return 0; }
+//    TMC5160_CS(cs_port, cs_pin, 0);
+//
+//    // second transfer is what actually returns the requested register's data
+//    TMC5160_CS(cs_port, cs_pin, 1);
+//    if (HAL_SPI_TransmitReceive(hspi, tx, rx, 5, 10) != HAL_OK) { TMC5160_CS(cs_port, cs_pin, 0); return 0; }
+//    TMC5160_CS(cs_port, cs_pin, 0);
+//
+//    *data_out = ((uint32_t)rx[1] << 24) | ((uint32_t)rx[2] << 16)
+//              | ((uint32_t)rx[3] << 8)  | (uint32_t)rx[4];
+//    return 1; // rx[0] is the SPI status byte (driver flags) if you want it later
+//}
+//
+//// Converts a desired RMS run current (amps) into IRUN (0-31), assuming GLOBALSCALER
+//// stays at its default full-scale value. NOTE: this is a simplified version of the
+//// TMC5160's two-stage current scaling - fine for now, revisit for finer control at
+//// low currents once you're tuning this joint for real.
+//static uint8_t TMC5160_CurrentToCS(float irun_amps, float rsense, uint8_t vsense_bit){
+//    float vfs = vsense_bit ? 0.180f : 0.325f;
+//    float cs = (irun_amps * 32.0f * 1.41421356f * (rsense + 0.02f) / vfs) - 1.0f;
+//    if (cs < 0) cs = 0;
+//    if (cs > 31) cs = 31;
+//    return (uint8_t)(cs + 0.5f);
+//}
+//
+//// Configures the TMC5160 joint (joint 1): SpreadCycle, finest microstepping, run current.
+//void TMC5160_ConfigJoint(SPI_HandleTypeDef *hspi, float rsense_ohm, float current_a){
+//    GPIO_TypeDef *cs_port = TMC5160_SPI_CS_PORT;
+//    uint16_t      cs_pin  = TMC5160_SPI_CS_PIN;
+//    uint8_t vsense_bit = 0;
+//
+//    // GCONF: en_pwm_mode=0 -> SpreadCycle. NOTE: TMC5160's GCONF bit here is the
+//    // OPPOSITE polarity convention from TMC2209's en_spreadcycle bit - on the 5160,
+//    // 0 = SpreadCycle, 1 = StealthChop, so SpreadCycle needs no bit set at all.
+//    TMC5160_WriteRegister(hspi, cs_port, cs_pin, TMC5160_REG_GCONF, 0x00000000);
+//
+//    // GLOBALSCALER: 0 = full scale (256/256) - current control handled entirely via IRUN below
+//    TMC5160_WriteRegister(hspi, cs_port, cs_pin, TMC5160_REG_GLOBALSCALER, 0x00000000);
+//
+//    // CHOPCONF: same field layout as TMC2209 - MRES=0 (1/256 microstepping), INTPOL=1
+//    uint32_t toff = 3, hstrt = 5, hend = 2, tbl = 2, mres = 0, intpol = 1;
+//    uint32_t chopconf = (toff << 0) | (hstrt << 4) | (hend << 7) | (tbl << 15)
+//                       | ((uint32_t)vsense_bit << 17) | (mres << 24) | (intpol << 28);
+//    TMC5160_WriteRegister(hspi, cs_port, cs_pin, TMC5160_REG_CHOPCONF, chopconf);
+//
+//    // IHOLD_IRUN: run current from current_a, hold current = 50% of run
+//    uint8_t irun_cs  = TMC5160_CurrentToCS(current_a, rsense_ohm, vsense_bit);
+//    uint8_t ihold_cs = TMC5160_CurrentToCS(current_a * 0.5f, rsense_ohm, vsense_bit);
+//    uint32_t ihold_irun = ((uint32_t)ihold_cs << 0) | ((uint32_t)irun_cs << 8) | (4UL << 16);
+//    TMC5160_WriteRegister(hspi, cs_port, cs_pin, TMC5160_REG_IHOLD_IRUN, ihold_irun);
+//}
+//
+//// Reads CHOPCONF/GCONF back and checks the write actually landed.
+//uint8_t TMC5160_VerifyJoint(SPI_HandleTypeDef *hspi){
+//    GPIO_TypeDef *cs_port = TMC5160_SPI_CS_PORT;
+//    uint16_t      cs_pin  = TMC5160_SPI_CS_PIN;
+//
+//    uint32_t chopconf = 0, gconf = 0;
+//    if (!TMC5160_ReadRegister(hspi, cs_port, cs_pin, TMC5160_REG_CHOPCONF, &chopconf)) return 0;
+//    if (!TMC5160_ReadRegister(hspi, cs_port, cs_pin, TMC5160_REG_GCONF, &gconf)) return 0;
+//
+//    uint32_t mres = (chopconf >> 24) & 0x0F;
+//    uint32_t en_pwm_mode = (gconf >> 2) & 0x01;
+//    return (mres == 0) && (en_pwm_mode == 0); // SpreadCycle -> en_pwm_mode should read back 0
+//}
+
+// ===================== Simple debug helper (works for either driver) =====================
+// Blinks PA5 fast forever if config verification fails, so a bad link is obvious
+// at a glance without needing a debugger attached.
+void Driver_ConfigFailBlink(void){
+    while (1)
+    {
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+        HAL_Delay(100);
+    }
+}
+// ===================== END =====================
 // TMC2209 UART CONFIG END
 /* USER CODE END 0 */
 
@@ -404,44 +603,15 @@ int main(void)
   Set_Servo_Angle(&htim4, TIM_CHANNEL_2, 0);
   //SERVO END
 
-  // TMC2209 STEP/DIR BEGIN
-  Stepper_UART_Config();     // set 1/256 microstepping, SpreadCycle, 1.2A run current
-  HAL_Delay(10);             // let the driver settle before reading back
-
-//  // ---- TEMPORARY DEBUG 3: raw echo/reply capture from the REAL driver ----
-//  // Put a breakpoint on the __NOP() line and inspect: dbg3_echo, dbg3_echo_ok,
-//  // dbg3_reply, dbg3_reply_ok, dbg3_crc_calc (compare against dbg3_reply[7]).
-//  static uint8_t dbg3_request[4];
-//  dbg3_request[0] = 0x05;
-//  dbg3_request[1] = TMC_SLAVE_ADDR;
-//  dbg3_request[2] = TMC_REG_CHOPCONF & 0x7F;
-//  dbg3_request[3] = TMC_CalcCRC(dbg3_request, 3);
-//
-//  static uint8_t dbg3_echo[4]  = {0xAA, 0xAA, 0xAA, 0xAA};
-//  static uint8_t dbg3_reply[8] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
-//
-//  HAL_UART_Transmit(&huart1, dbg3_request, 4, 10);
-//  HAL_StatusTypeDef dbg3_echo_ok  = TMC_ReceiveBytes(dbg3_echo, 4, 50);
-//  HAL_StatusTypeDef dbg3_reply_ok = TMC_ReceiveBytes(dbg3_reply, 8, 50);
-//  uint8_t dbg3_crc_calc = TMC_CalcCRC(dbg3_reply, 7); // compare to dbg3_reply[7]
-//
-//   __NOP(); // <-- BREAKPOINT HERE
-////   ---- END TEMPORARY DEBUG 3 ----
-//
-//  if (!Stepper_UART_VerifyConfig())
-//  {
-//	  // config read-back failed or didn't match -> blink PA5 fast forever so
-//	  // it's obvious at a glance, instead of silently running on wrong settings
-//	  while (1)
-//	  {
-//		  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-//		  HAL_Delay(100);
-//	  }
+  TMC2209_ConfigJoint(5);          // set 1/256 microstepping, SpreadCycle, run current for joint 5
+//  HAL_Delay(10);                   // let the driver settle before reading back
+//  if (!TMC2209_VerifyJoint(5)){
+//	Driver_ConfigFailBlink();    // config read-back failed or didn't match - PA5 blinks fast forever
 //  }
-  Stepper_SetDirection(1);   // pick a direction to start; flip to 0 to reverse
-  Stepper_Enable(1);         // pulls EN (PB0) low -> driver enabled
-  Stepper_Run(1);            // starts STEP pulses on TIM2 CH2 -> motor spins continuously
-  // TMC2209 STEP/DIR END
+
+  Joint_Enable(1);                  // pulls shared EN low -> all drivers enabled
+  Joint_SetDirection(5, 1);         // joint 5: pick a direction to start; flip to 0 to reverse
+  Joint_Run(5, 1);                  // starts STEP pulses on joint 5's timer -> motor spins continuously
   /* USER CODE END 2 */
 
   /* Infinite loop */
