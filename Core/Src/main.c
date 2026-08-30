@@ -30,6 +30,120 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+// Hardware configuration
+#define NUM_JOINTS          6
+#define NUM_LIMIT_SWITCHES  6
+#define NUM_HALL_SENSORS    6
+
+// Shared EN pin
+#define EN_PORT   GPIOB
+#define EN_PIN    GPIO_PIN_0
+
+// DIR/STEP pins
+#define JOINT0_DIR_PORT   GPIOC
+#define JOINT0_DIR_PIN    GPIO_PIN_0
+#define JOINT0_STEP_TIM   htim2
+#define JOINT0_STEP_CH    TIM_CHANNEL_2
+
+#define JOINT1_DIR_PORT   GPIOA             // PLACEHOLDER (TMC5160)
+#define JOINT1_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT1_STEP_TIM   htim3             // PLACEHOLDER - not generated in CubeMX yet
+#define JOINT1_STEP_CH    TIM_CHANNEL_1     // PLACEHOLDER
+
+#define JOINT2_DIR_PORT   GPIOA             // PLACEHOLDER
+#define JOINT2_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT2_STEP_TIM   htim3             // PLACEHOLDER
+#define JOINT2_STEP_CH    TIM_CHANNEL_2     // PLACEHOLDER
+
+#define JOINT3_DIR_PORT   GPIOA             // PLACEHOLDER
+#define JOINT3_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT3_STEP_TIM   htim3             // PLACEHOLDER
+#define JOINT3_STEP_CH    TIM_CHANNEL_3     // PLACEHOLDER
+
+#define JOINT4_DIR_PORT   GPIOA             // PLACEHOLDER
+#define JOINT4_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT4_STEP_TIM   htim3             // PLACEHOLDER
+#define JOINT4_STEP_CH    TIM_CHANNEL_4     // PLACEHOLDER
+
+#define JOINT5_DIR_PORT   GPIOA             // PLACEHOLDER
+#define JOINT5_DIR_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT5_STEP_TIM   htim5             // PLACEHOLDER - TIM3 fully used by joints 1-4
+#define JOINT5_STEP_CH    TIM_CHANNEL_1     // PLACEHOLDER
+
+// UART for TMC2209
+#define TMC_UART1_TX_PORT  GPIOA
+#define TMC_UART1_TX_PIN   GPIO_PIN_9       // CONFIRMED (USART1_TX)
+#define TMC_UART1_RX_PORT  GPIOA
+#define TMC_UART1_RX_PIN   GPIO_PIN_10      // CONFIRMED (USART1_RX)
+
+#define TMC_UART2_TX_PORT  GPIOA            // PLACEHOLDER - not generated in CubeMX yet
+#define TMC_UART2_TX_PIN   GPIO_PIN_0       // PLACEHOLDER
+#define TMC_UART2_RX_PORT  GPIOA            // PLACEHOLDER
+#define TMC_UART2_RX_PIN   GPIO_PIN_0       // PLACEHOLDER
+
+// UART Bus and Slave Addresses
+#define JOINT0_UART_BUS     1
+#define JOINT0_SLAVE_ADDR   0
+
+#define JOINT2_UART_BUS     2                // PLACEHOLDER
+#define JOINT2_SLAVE_ADDR   0                // PLACEHOLDER
+
+#define JOINT3_UART_BUS     2                // PLACEHOLDER
+#define JOINT3_SLAVE_ADDR   1                // PLACEHOLDER
+
+#define JOINT4_UART_BUS     2                // PLACEHOLDER
+#define JOINT4_SLAVE_ADDR   2                // PLACEHOLDER
+
+#define JOINT5_UART_BUS     2                // PLACEHOLDER
+#define JOINT5_SLAVE_ADDR   3                // PLACEHOLDER
+
+// SPI for TMC5160
+#define TMC5160_SPI_MOSI_PORT  GPIOA        // PLACEHOLDER - not generated in CubeMX yet
+#define TMC5160_SPI_MOSI_PIN   GPIO_PIN_0   // PLACEHOLDER
+#define TMC5160_SPI_MISO_PORT  GPIOA        // PLACEHOLDER
+#define TMC5160_SPI_MISO_PIN   GPIO_PIN_0   // PLACEHOLDER
+#define TMC5160_SPI_SCK_PORT   GPIOA        // PLACEHOLDER
+#define TMC5160_SPI_SCK_PIN    GPIO_PIN_0   // PLACEHOLDER
+#define TMC5160_SPI_CS_PORT    GPIOA        // PLACEHOLDER
+#define TMC5160_SPI_CS_PIN     GPIO_PIN_0   // PLACEHOLDER
+
+
+// Run current per joint
+#define JOINT0_CURRENT_A    1.2f             // CONFIRMED
+#define JOINT1_CURRENT_A    1.2f             // PLACEHOLDER (TMC5160)
+#define JOINT2_CURRENT_A    1.2f             // PLACEHOLDER
+#define JOINT3_CURRENT_A    1.2f             // PLACEHOLDER
+#define JOINT4_CURRENT_A    1.2f             // PLACEHOLDER
+#define JOINT5_CURRENT_A    1.2f             // PLACEHOLDER
+
+// Limit switches
+#define LIMIT0_PORT   GPIOC
+#define LIMIT0_PIN    GPIO_PIN_4
+#define LIMIT1_PORT   GPIOA                 // PLACEHOLDER - wiring pin TBD
+#define LIMIT1_PIN    GPIO_PIN_0            // PLACEHOLDER
+#define LIMIT2_PORT   GPIOA                 // PLACEHOLDER
+#define LIMIT2_PIN    GPIO_PIN_0            // PLACEHOLDER
+#define LIMIT3_PORT   GPIOA                 // PLACEHOLDER
+#define LIMIT3_PIN    GPIO_PIN_0            // PLACEHOLDER
+#define LIMIT4_PORT   GPIOA                 // PLACEHOLDER
+#define LIMIT4_PIN    GPIO_PIN_0            // PLACEHOLDER
+#define LIMIT5_PORT   GPIOA                 // PLACEHOLDER
+#define LIMIT5_PIN    GPIO_PIN_0            // PLACEHOLDER
+
+// Hall effect sensors
+#define HALL0_PORT    GPIOB
+#define HALL0_PIN     GPIO_PIN_13
+#define HALL1_PORT    GPIOA                 // PLACEHOLDER
+#define HALL1_PIN     GPIO_PIN_0            // PLACEHOLDER
+#define HALL2_PORT    GPIOA                 // PLACEHOLDER
+#define HALL2_PIN     GPIO_PIN_0            // PLACEHOLDER
+#define HALL3_PORT    GPIOA                 // PLACEHOLDER
+#define HALL3_PIN     GPIO_PIN_0            // PLACEHOLDER
+#define HALL4_PORT    GPIOA                 // PLACEHOLDER
+#define HALL4_PIN     GPIO_PIN_0            // PLACEHOLDER
+#define HALL5_PORT    GPIOA                 // PLACEHOLDER
+#define HALL5_PIN     GPIO_PIN_0            // PLACEHOLDER
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -61,7 +175,7 @@ static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN 0 */
 // SERVO BEGIN
 void Set_Servo_Angle(TIM_HandleTypeDef *htim, uint32_t channel, uint8_t angle){
-    uint32_t pulse_length = 210 + ((uint32_t)angle * (1050 - 210)) / 180;
+    uint32_t pulse_length = 225 + ((uint32_t)angle * (1125 - 225)) / 180;
     __HAL_TIM_SET_COMPARE(htim, channel, pulse_length);
 }
 // SERVO END
@@ -379,7 +493,7 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -389,11 +503,18 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 84;
+  RCC_OscInitStruct.PLL.PLLN = 180;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Activate the Over-Drive mode
+  */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
@@ -404,10 +525,10 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
   {
     Error_Handler();
   }
@@ -433,7 +554,7 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 84-1;
+  htim2.Init.Prescaler = 90-1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 1000-1;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -494,7 +615,7 @@ static void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 200-1;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 8400-1;
+  htim4.Init.Period = 9000-1;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
