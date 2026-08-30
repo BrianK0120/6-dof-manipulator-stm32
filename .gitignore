@@ -1,0 +1,22 @@
+# Toolchain / Build outputs
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.su
+*.d
+
+# STM32CubeIDE / Eclipse internal settings
+.settings/
+.metadata/
+ remote_connections.xml
+
+# Log files
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
