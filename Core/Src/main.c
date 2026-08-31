@@ -168,7 +168,7 @@
 #define JOINT5_MICROSTEPS   8
 
 // Homing config
-#define HOMING_SPEED_HZ   1000
+#define HOMING_SPEED_DEG_PER_SEC   225.0f
 #define JOINT0_HOMING_MAX_DEG   360.0f
 #define JOINT1_HOMING_MAX_DEG   270.0f
 #define JOINT2_HOMING_MAX_DEG   300.0f
@@ -408,12 +408,86 @@ static uint32_t Joint_DegToSteps(uint8_t joint, float deg){
     return (uint32_t)(fabsf(deg) / 360.0f * steps_per_output_rev);
 }
 
+// Converts an OUTPUT-SHAFT speed (deg/s) into that joint's own raw STEP frequency,
+// accounting for its individual gear ratio and microsteps - same formula
+// Joint_MoveAtSpeed uses, so every joint moves at a comparable real-world speed
+// for a given deg/s target regardless of how different their gear ratios are.
+static uint32_t Joint_SpeedToFreq(uint8_t joint, float deg_per_sec){
+    float steps_per_output_rev = MOTOR_FULL_STEPS_PER_REV
+                                * (float)joint_cfg[joint].microsteps
+                                * joint_cfg[joint].gear_ratio;
+    return (uint32_t)(fabsf(deg_per_sec) / 360.0f * steps_per_output_rev);
+}
+
+// Quick ramp-down before stopping - NOT a full trapezoidal profile (that's
+// deferred, separate work), just enough to avoid an instantaneous full-speed
+// cut, which was leaving real kinetic energy in the rotor to snap/ring back
+// against the driver's holding torque. Doesn't affect homing accuracy at all -
+// this only runs AFTER the magnet's midpoint has already been captured.
+static void Joint_DecelStop(uint8_t joint, uint32_t from_freq){
+    // Shorter dwell per stage than before (2ms vs 20ms) - the previous version
+    // likely lingered long enough at one intermediate speed to sit right in the
+    // ~300Hz resonance band and build up vibration there instead of avoiding it.
+    // A fast sweep-through spends far less time at any one frequency.
+    uint32_t freq = from_freq;
+    for (uint8_t i = 0; i < 8 && freq > 50; i++){
+        freq = (freq * 3) / 4; // smaller, more numerous steps than before
+        Joint_SetStepFrequency(joint, freq);
+        HAL_Delay(2);
+    }
+    Joint_Run(joint, 0);
+}
+
+void Joint_MoveToPosition(uint8_t joint, int32_t target_pos, float speed_deg_per_sec){
+    if (joint >= NUM_JOINTS || !joint_cfg[joint].configured) return;
+
+    int32_t current = Joint_GetPosition(joint);
+    int32_t delta = target_pos - current;
+    if (delta == 0) return;
+
+    uint8_t dir = (delta > 0) ? 1 : 0;
+    uint32_t freq = Joint_SpeedToFreq(joint, speed_deg_per_sec);
+
+    Joint_SetDirection(joint, dir);
+    Joint_SetStepFrequency(joint, freq);
+    Joint_Run(joint, 1);
+
+    while (1){
+        if (joint_limit_hit[joint]){
+            joint_limit_hit[joint] = 0;
+            Joint_Run(joint, 0);
+            return; // stopped early - hit a limit before reaching target
+        }
+        int32_t remaining = target_pos - Joint_GetPosition(joint);
+        if ((dir == 1 && remaining <= 0) || (dir == 0 && remaining >= 0)){
+            break; // reached or passed target
+        }
+    }
+    Joint_DecelStop(joint, freq);
+}
+
 uint8_t Homing_Joint(uint8_t joint, int8_t search_dir){
     if (joint >= NUM_JOINTS || !joint_cfg[joint].configured){
     	return 0;
     }
 
+    // Hall reading is corrupted by heavy motor-generated EMI (measured ~200k
+    // spurious transitions/sec while running) - a rolling vote/integrator filter
+    // is used instead of a simple "hold steady for Xms" debounce, since even
+    // genuine magnet-present dwell time still has some noise mixed in, and that
+    // residual noise kept resetting a plain debounce timer before it could ever
+    // confirm. Every sample nudges a counter toward whichever state it reads;
+    // only trust a state once the counter has swung decisively that way (a
+    // hysteresis band between HIGH/LOW avoids chatter right at the boundary).
+    // This resolves in well under a millisecond given how fast this loop runs,
+    // so it isn't sensitive to step frequency the way a fixed-time debounce was -
+    // PLACEHOLDERS below, widen the MAX/spread for more noise immunity if needed.
+    #define HALL_FILTER_MAX   200
+    #define HALL_FILTER_HIGH  180
+    #define HALL_FILTER_LOW   20
+
     uint32_t max_steps = Joint_DegToSteps(joint, joint_homing_max_deg[joint]);
+    uint32_t homing_freq = Joint_SpeedToFreq(joint, HOMING_SPEED_DEG_PER_SEC);
     joint_limit_hit[joint] = 0;
     homing_in_progress = 1;
 
@@ -421,12 +495,19 @@ uint8_t Homing_Joint(uint8_t joint, int8_t search_dir){
 
     for (uint8_t attempt = 0; attempt < 2; attempt++){
         int32_t start_pos = Joint_GetPosition(joint);
-        uint8_t hall_prev = HAL_GPIO_ReadPin(joint_hall_port[joint], joint_hall_pin[joint]);
+
+        // seed the filter from an initial read so we don't register a spurious
+        // "just found it" transition right at the start of the search
+        uint8_t initial_read = HAL_GPIO_ReadPin(joint_hall_port[joint], joint_hall_pin[joint]);
+        int32_t hall_filter = (initial_read == GPIO_PIN_RESET) ? HALL_FILTER_MAX : 0;
+        uint8_t hall_confirmed_present = (initial_read == GPIO_PIN_RESET) ? 1 : 0;
+        uint8_t hall_prev_confirmed = hall_confirmed_present;
+
         int32_t rise_pos = 0, fall_pos = 0;
         uint8_t saw_rise = 0, saw_fall = 0;
 
         Joint_SetDirection(joint, dir > 0 ? 1 : 0);
-        Joint_SetStepFrequency(joint, HOMING_SPEED_HZ);
+        Joint_SetStepFrequency(joint, homing_freq);
         Joint_Run(joint, 1);
 
         while (1){
@@ -435,18 +516,31 @@ uint8_t Homing_Joint(uint8_t joint, int8_t search_dir){
                 break; // hit a limit before finding the magnet on this pass
             }
 
-            // GPIO_PIN_RESET = magnet present
+            // GPIO_PIN_RESET = magnet present - each sample nudges the vote counter
             uint8_t hall_now = HAL_GPIO_ReadPin(joint_hall_port[joint], joint_hall_pin[joint]);
-            if (!saw_rise && hall_now != hall_prev && hall_now == GPIO_PIN_RESET){
-                rise_pos = Joint_GetPosition(joint);
-                saw_rise = 1;
-            } else if (saw_rise && !saw_fall && hall_now != hall_prev && hall_now == GPIO_PIN_SET){
-                fall_pos = Joint_GetPosition(joint);
-                saw_fall = 1;
-                Joint_Run(joint, 0);
-                break; // found both edges
+            if (hall_now == GPIO_PIN_RESET){
+                if (hall_filter < HALL_FILTER_MAX) hall_filter++;
+            } else {
+                if (hall_filter > 0) hall_filter--;
             }
-            hall_prev = hall_now;
+
+            if (hall_filter >= HALL_FILTER_HIGH) hall_confirmed_present = 1;
+            else if (hall_filter <= HALL_FILTER_LOW) hall_confirmed_present = 0;
+            // else: stays whatever it was last - genuinely undecided zone
+
+            if (hall_confirmed_present != hall_prev_confirmed){
+                if (!saw_rise && hall_confirmed_present){
+                    rise_pos = Joint_GetPosition(joint);
+                    saw_rise = 1;
+                } else if (saw_rise && !saw_fall && !hall_confirmed_present){
+                    fall_pos = Joint_GetPosition(joint);
+                    saw_fall = 1;
+                    Joint_DecelStop(joint, homing_freq); // gentle stop instead of an instant cut
+                    hall_prev_confirmed = hall_confirmed_present;
+                    break; // found both edges
+                }
+                hall_prev_confirmed = hall_confirmed_present;
+            }
 
             int32_t traveled = Joint_GetPosition(joint) - start_pos;
             if ((uint32_t)(traveled < 0 ? -traveled : traveled) > max_steps){
@@ -472,15 +566,22 @@ uint8_t Homing_Joint(uint8_t joint, int8_t search_dir){
     return 0; // searched both directions, never found the magnet
 }
 
+static int32_t Joint_DegToSignedSteps(uint8_t joint, float deg){
+    float steps_per_output_rev = MOTOR_FULL_STEPS_PER_REV
+                                * (float)joint_cfg[joint].microsteps
+                                * joint_cfg[joint].gear_ratio;
+    return (int32_t)(deg / 360.0f * steps_per_output_rev);
+}
+
 // Homing order and initial search direction per joint.
 static const uint8_t homing_order[NUM_JOINTS]      = {0, 1, 2, 3, 4, 5};
 static const int8_t  homing_search_dir[NUM_JOINTS] = {1, 1, 1, 1, 1, 1};
+static const float homing_clearance_deg[NUM_JOINTS] = {0, 0, 0, 0, 0, 0};
 
 // Ready/idle stance to move to once every joint is homed, in output-shaft degrees
 // from each joint's now-zeroed home position.
 static const float idle_stance_deg[NUM_JOINTS] = {0, 0, 0, 0, 0, 0};
 
-// Homes every joint in sequence, then moves to the idle stance.
 uint8_t Robot_HomeAll(void){
     for (uint8_t i = 0; i < NUM_JOINTS; i++){
         uint8_t joint = homing_order[i];
@@ -491,16 +592,20 @@ uint8_t Robot_HomeAll(void){
         if (!Homing_Joint(joint, homing_search_dir[joint])){
             return 0; // one joint failed - stop the whole sequence rather than guess
         }
+
+        if (homing_clearance_deg[joint] != 0.0f){
+            int32_t clearance_target = Joint_DegToSignedSteps(joint, homing_clearance_deg[joint]);
+            Joint_MoveToPosition(joint, clearance_target, HOMING_SPEED_DEG_PER_SEC);
+        }
     }
 
+    // All joints homed and clear of each other - now move everyone to the final stance
     for (uint8_t j = 0; j < NUM_JOINTS; j++){
         if (!joint_cfg[j].configured || idle_stance_deg[j] == 0.0f){
         	continue;
         }
-        // TODO: placeholder move - replace with real position control
-        Joint_MoveAtSpeed(j, idle_stance_deg[j] > 0 ? 30.0f : -30.0f);
-        HAL_Delay(500);
-        Joint_Run(j, 0);
+        int32_t idle_target = Joint_DegToSignedSteps(j, idle_stance_deg[j]);
+        Joint_MoveToPosition(j, idle_target, HOMING_SPEED_DEG_PER_SEC);
     }
 
     return 1;
@@ -823,29 +928,23 @@ int main(void)
 //	Driver_ConfigFailBlink();    // config read-back failed or didn't match - PA5 blinks fast forever
 //  }
 
-  Joint_Enable(1);
-  Joint_SetDirection(5, 1);
-  Joint_SetStepFrequency(5, 1000);
-  Joint_Run(5, 1);
-
-
-//  // HOMING TEST - joint 5 only, hall-only (no limit switch involved for this joint)
-//  uint8_t joint5_homed = Homing_Joint(5, 1);   // try direction 1 first; flip to -1 if it searches the wrong way
-//  if (joint5_homed){
-//		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET); // solid ON = homing succeeded
-//  } else {
-//	Driver_ConfigFailBlink(); // fast blink forever = homing failed (never found the magnet)
-//  }
-
+//  Joint_Enable(1);
+//  Joint_SetDirection(5, 1);
+//  Joint_SetStepFrequency(5, 1000);
+//  Joint_Run(5, 1);
 //  Homing_Joint(5, 1);
 
-//  // HOMING TEST - joint 5 only, hall-only (no limit switch involved for this joint)
-//  uint8_t joint5_homed = Homing_Joint(5, 1);   // try direction 1 first; flip to -1 if it searches the wrong way
-//  if (joint5_homed){
-//		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET); // solid ON = homing succeeded
-//  } else {
-//	Driver_ConfigFailBlink(); // fast blink forever = homing failed (never found the magnet)
-//  }
+  Joint_Enable(1);
+
+  // HOMING TEST - joint 5 only, hall-only (no limit switch involved for this joint)
+  uint8_t joint5_homed = Homing_Joint(5, 1);
+  if (joint5_homed){
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET); // solid ON = homing succeeded
+  } else {
+      Driver_ConfigFailBlink(); // fast blink forever = homing failed
+  }
+
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -855,44 +954,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-
-
-	#define HALL_FILTER_MAX     1000   // how much "evidence" accumulates before trusting a state
-	#define HALL_FILTER_HIGH   	900   // confirm "magnet present" once counter climbs this high
-	#define HALL_FILTER_LOW     100    // confirm "magnet absent" once counter drops this low
-	// (the gap between HIGH and LOW is a hysteresis band - once confirmed, stays confirmed
-	// until the counter swings decisively the other way, so it doesn't chatter right at the edge)
-
-	static int32_t hall_filter = 500; // start neutral, mid-range
-	static uint8_t hall_confirmed_present = 0;
-
-	uint8_t hall_now = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
-	if (hall_now == GPIO_PIN_RESET){          // this sample says "magnet"
-		if (hall_filter < HALL_FILTER_MAX) hall_filter++;
-	} else {                                   // this sample says "no magnet"
-		if (hall_filter > 0) hall_filter--;
-	}
-
-	if (hall_filter >= HALL_FILTER_HIGH) hall_confirmed_present = 1;
-	else if (hall_filter <= HALL_FILTER_LOW) hall_confirmed_present = 0;
-	// else: leave hall_confirmed_present exactly as it was - genuinely undecided zone
-
-	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, hall_confirmed_present ? GPIO_PIN_SET : GPIO_PIN_RESET);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 //	// SERVO BEGIN
 //	Set_Servo_Angle(&htim4, TIM_CHANNEL_2, 0);
 //	HAL_Delay(1000);
