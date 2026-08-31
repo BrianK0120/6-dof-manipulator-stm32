@@ -117,33 +117,39 @@
 #define JOINT4_CURRENT_A    1.2f             // PLACEHOLDER
 #define JOINT5_CURRENT_A    1.2f             // PLACEHOLDER
 
-// Limit switches
-#define LIMIT0_PORT   GPIOC
-#define LIMIT0_PIN    GPIO_PIN_4
-#define LIMIT1_PORT   GPIOA                 // PLACEHOLDER - wiring pin TBD
-#define LIMIT1_PIN    GPIO_PIN_0            // PLACEHOLDER
-#define LIMIT2_PORT   GPIOA                 // PLACEHOLDER
-#define LIMIT2_PIN    GPIO_PIN_0            // PLACEHOLDER
-#define LIMIT3_PORT   GPIOA                 // PLACEHOLDER
-#define LIMIT3_PIN    GPIO_PIN_0            // PLACEHOLDER
-#define LIMIT4_PORT   GPIOA                 // PLACEHOLDER
-#define LIMIT4_PIN    GPIO_PIN_0            // PLACEHOLDER
-#define LIMIT5_PORT   GPIOA                 // PLACEHOLDER
-#define LIMIT5_PIN    GPIO_PIN_0            // PLACEHOLDER
+
+// Interrupt
+// Each of these 6 needs a distinct pin NUMBER (0-15), not just a distinct
+// port, or they'll collide on the same interrupt line.
+#define JOINT1_LIMIT_MIN_PORT   GPIOA        // PLACEHOLDER
+#define JOINT1_LIMIT_MIN_PIN    GPIO_PIN_0   // PLACEHOLDER
+#define JOINT1_LIMIT_MAX_PORT   GPIOA        // PLACEHOLDER
+#define JOINT1_LIMIT_MAX_PIN    GPIO_PIN_0   // PLACEHOLDER
+
+#define JOINT2_LIMIT_MIN_PORT   GPIOA        // PLACEHOLDER
+#define JOINT2_LIMIT_MIN_PIN    GPIO_PIN_0   // PLACEHOLDER
+#define JOINT2_LIMIT_MAX_PORT   GPIOA        // PLACEHOLDER
+#define JOINT2_LIMIT_MAX_PIN    GPIO_PIN_0   // PLACEHOLDER
+
+#define JOINT4_LIMIT_MIN_PORT   GPIOA        // PLACEHOLDER
+#define JOINT4_LIMIT_MIN_PIN    GPIO_PIN_0   // PLACEHOLDER
+#define JOINT4_LIMIT_MAX_PORT   GPIOC        // your previously-tested pin (PC4) is one
+#define JOINT4_LIMIT_MAX_PIN    GPIO_PIN_4   // of these six - slot it into whichever end it actually is
+
 
 // Hall effect sensors
-#define HALL0_PORT    GPIOB
-#define HALL0_PIN     GPIO_PIN_13
-#define HALL1_PORT    GPIOA                 // PLACEHOLDER
-#define HALL1_PIN     GPIO_PIN_0            // PLACEHOLDER
-#define HALL2_PORT    GPIOA                 // PLACEHOLDER
-#define HALL2_PIN     GPIO_PIN_0            // PLACEHOLDER
-#define HALL3_PORT    GPIOA                 // PLACEHOLDER
-#define HALL3_PIN     GPIO_PIN_0            // PLACEHOLDER
-#define HALL4_PORT    GPIOA                 // PLACEHOLDER
-#define HALL4_PIN     GPIO_PIN_0            // PLACEHOLDER
-#define HALL5_PORT    GPIOA                 // PLACEHOLDER
-#define HALL5_PIN     GPIO_PIN_0            // PLACEHOLDER
+#define JOINT0_HALL_PORT   GPIOA             // PLACEHOLDER
+#define JOINT0_HALL_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT1_HALL_PORT   GPIOA             // PLACEHOLDER
+#define JOINT1_HALL_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT2_HALL_PORT   GPIOA             // PLACEHOLDER
+#define JOINT2_HALL_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT3_HALL_PORT   GPIOA             // PLACEHOLDER
+#define JOINT3_HALL_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT4_HALL_PORT   GPIOA             // PLACEHOLDER
+#define JOINT4_HALL_PIN    GPIO_PIN_0        // PLACEHOLDER
+#define JOINT5_HALL_PORT   GPIOB             // your previously-tested pin (PB13)
+#define JOINT5_HALL_PIN    GPIO_PIN_13
 
 // Joint gear ratios
 #define JOINT0_GEAR_RATIO   200.0f/30.0f
@@ -154,12 +160,21 @@
 #define JOINT5_GEAR_RATIO   1.0f
 
 // Joint microsteps
-#define JOINT0_MICROSTEPS   256             // CONFIRMED (matches Stepper_UART_Config's MRES=0)
+#define JOINT0_MICROSTEPS   8
 #define JOINT1_MICROSTEPS   256
 #define JOINT2_MICROSTEPS   256
 #define JOINT3_MICROSTEPS   256
 #define JOINT4_MICROSTEPS   256
-#define JOINT5_MICROSTEPS   256
+#define JOINT5_MICROSTEPS   8
+
+// Homing config
+#define HOMING_SPEED_HZ   1000
+#define JOINT0_HOMING_MAX_DEG   360.0f
+#define JOINT1_HOMING_MAX_DEG   270.0f
+#define JOINT2_HOMING_MAX_DEG   300.0f
+#define JOINT3_HOMING_MAX_DEG   360.0f
+#define JOINT4_HOMING_MAX_DEG   300.0f
+#define JOINT5_HOMING_MAX_DEG   360.0f
 
 /* USER CODE END PD */
 
@@ -171,6 +186,7 @@
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim5;
 
 UART_HandleTypeDef huart1;
 
@@ -184,6 +200,7 @@ static void MX_GPIO_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM5_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -205,6 +222,7 @@ typedef struct {
     uint16_t           dir_pin;
     TIM_HandleTypeDef *step_tim;   // NULL until this joint's timer is generated in CubeMX
     uint32_t           step_ch;
+    TIM_HandleTypeDef *count_tim;
     float              gear_ratio;
     uint16_t           microsteps;
     uint8_t            configured; // 1 = real hardware, 0 = placeholder (calls no-op)
@@ -212,36 +230,57 @@ typedef struct {
 
 static JointConfig joint_cfg[NUM_JOINTS] = {
     // Joint 0
-    { JOINT0_DIR_PORT, JOINT0_DIR_PIN, NULL, JOINT0_STEP_CH,
+    { JOINT0_DIR_PORT, JOINT0_DIR_PIN, NULL, JOINT0_STEP_CH, NULL,
       JOINT0_GEAR_RATIO, JOINT0_MICROSTEPS, 0 },
     // Joint 1 (TMC5160)
-    { JOINT1_DIR_PORT, JOINT1_DIR_PIN, NULL, JOINT1_STEP_CH,
+    { JOINT1_DIR_PORT, JOINT1_DIR_PIN, NULL, JOINT1_STEP_CH, NULL,
       JOINT1_GEAR_RATIO, JOINT1_MICROSTEPS, 0 },
     // Joint 2
-    { JOINT2_DIR_PORT, JOINT2_DIR_PIN, NULL, JOINT2_STEP_CH,
+    { JOINT2_DIR_PORT, JOINT2_DIR_PIN, NULL, JOINT2_STEP_CH, NULL,
       JOINT2_GEAR_RATIO, JOINT2_MICROSTEPS, 0 },
     // Joint 3
-    { JOINT3_DIR_PORT, JOINT3_DIR_PIN, NULL, JOINT3_STEP_CH,
+    { JOINT3_DIR_PORT, JOINT3_DIR_PIN, NULL, JOINT3_STEP_CH, NULL,
       JOINT3_GEAR_RATIO, JOINT3_MICROSTEPS, 0 },
     // Joint 4
-    { JOINT4_DIR_PORT, JOINT4_DIR_PIN, NULL, JOINT4_STEP_CH,
+    { JOINT4_DIR_PORT, JOINT4_DIR_PIN, NULL, JOINT4_STEP_CH, NULL,
       JOINT4_GEAR_RATIO, JOINT4_MICROSTEPS, 0 },
-    // Joint 5
-    { JOINT5_DIR_PORT, JOINT5_DIR_PIN, &JOINT5_STEP_TIM, JOINT5_STEP_CH,
+    { JOINT5_DIR_PORT, JOINT5_DIR_PIN, &JOINT5_STEP_TIM, JOINT5_STEP_CH, &htim5,
       JOINT5_GEAR_RATIO, JOINT5_MICROSTEPS, 1 },
 };
+static volatile int32_t joint_position[NUM_JOINTS] = {0};
+static volatile int8_t  joint_dir_sign[NUM_JOINTS] = {0};
 
 void Joint_Enable(uint8_t enable){
 	// Active-low EN
     HAL_GPIO_WritePin(EN_PORT, EN_PIN, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
+static void Joint_ReconcilePosition(uint8_t joint){
+    if (joint_cfg[joint].count_tim == NULL){
+    	return; // counting timer not generated yet
+    }
+    uint32_t counted = __HAL_TIM_GET_COUNTER(joint_cfg[joint].count_tim);
+    joint_position[joint] += joint_dir_sign[joint] * (int32_t)counted;
+    __HAL_TIM_SET_COUNTER(joint_cfg[joint].count_tim, 0);
+}
+
+int32_t Joint_GetPosition(uint8_t joint){
+    if (joint >= NUM_JOINTS || joint_cfg[joint].count_tim == NULL){
+    	return joint_position[joint];
+    }
+    uint32_t counted = __HAL_TIM_GET_COUNTER(joint_cfg[joint].count_tim);
+    return joint_position[joint] + joint_dir_sign[joint] * (int32_t)counted;
+}
+
+
 void Joint_SetDirection(uint8_t joint, uint8_t dir){
-	// REMEMBER TO GET RID OF THE !joint_cfg[joint[.configure LATER WHEN EVERYTHING IS PROPERLY CONFIGURED (waste of calcs)!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	// REMEMBER TO GET RID OF THE !joint_cfg[joint[.configure LATER WHEN EVERYTHING IS PROPERLY CONFIGURED (waste of calcs)!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     if (joint >= NUM_JOINTS || !joint_cfg[joint].configured){
     	return;
     }
 
+    Joint_ReconcilePosition(joint); // fold in whatever was counted under the OLD direction first
+    joint_dir_sign[joint] = dir ? 1 : -1;
     HAL_GPIO_WritePin(joint_cfg[joint].dir_port, joint_cfg[joint].dir_pin, dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
@@ -253,6 +292,7 @@ void Joint_Run(uint8_t joint, uint8_t run){
     if (run){
     	HAL_TIM_PWM_Start(joint_cfg[joint].step_tim, joint_cfg[joint].step_ch);
     } else{
+    	Joint_ReconcilePosition(joint); // fold in this run's steps before stopping
     	HAL_TIM_PWM_Stop(joint_cfg[joint].step_tim, joint_cfg[joint].step_ch);
     }
 }
@@ -294,6 +334,179 @@ void Joint_MoveAtSpeed(uint8_t joint, float output_deg_per_sec){
     Joint_Run(joint, 1);
 }
 // JOINT STEP/DIR/EN END
+
+// LIMIT SWITCHES START
+
+static volatile uint8_t joint_limit_hit[NUM_JOINTS] = {0};
+static volatile uint8_t homing_in_progress = 0; // suppresses fault-event reporting during homing search
+
+// Simple event queue for the host. TODO: once the serial command protocol exists,
+// drain this from the main loop (or a serial task) and send a LIMIT_HIT packet for
+// each entry - for now this just records the fact so nothing is silently lost.
+typedef struct {
+    uint8_t joint;
+    uint8_t which; // 0 = MIN switch, 1 = MAX switch
+} LimitEvent_t;
+
+#define LIMIT_EVENT_QUEUE_LEN 8
+static LimitEvent_t limit_event_queue[LIMIT_EVENT_QUEUE_LEN];
+static volatile uint8_t limit_event_head = 0, limit_event_tail = 0;
+
+static void LimitEvent_Enqueue(uint8_t joint, uint8_t which){
+    uint8_t next = (limit_event_head + 1) % LIMIT_EVENT_QUEUE_LEN;
+    if (next == limit_event_tail){
+    	return; // full - drop rather than overwrite (shouldn't happen in practice)
+    }
+    limit_event_queue[limit_event_head].joint = joint;
+    limit_event_queue[limit_event_head].which = which;
+    limit_event_head = next;
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+    static const struct { uint16_t pin; uint8_t joint; uint8_t which; } limit_map[] = {
+        { JOINT1_LIMIT_MIN_PIN, 1, 0 },
+        { JOINT1_LIMIT_MAX_PIN, 1, 1 },
+        { JOINT2_LIMIT_MIN_PIN, 2, 0 },
+        { JOINT2_LIMIT_MAX_PIN, 2, 1 },
+        { JOINT4_LIMIT_MIN_PIN, 4, 0 },
+        { JOINT4_LIMIT_MAX_PIN, 4, 1 },
+    };
+
+    for (uint8_t i = 0; i < sizeof(limit_map) / sizeof(limit_map[0]); i++){
+        if (limit_map[i].pin == GPIO_Pin){
+            uint8_t joint = limit_map[i].joint;
+            Joint_Run(joint, 0); // stop immediately, homing or not
+            joint_limit_hit[joint] = 1;
+
+            if (!homing_in_progress){
+                LimitEvent_Enqueue(joint, limit_map[i].which); // unexpected - flag for the host, don't auto-recover
+            }
+            return;
+        }
+    }
+}
+// LIMIT SWITCHES END
+
+// HOMING START
+static GPIO_TypeDef *joint_hall_port[NUM_JOINTS] = {
+    JOINT0_HALL_PORT, JOINT1_HALL_PORT, JOINT2_HALL_PORT,
+    JOINT3_HALL_PORT, JOINT4_HALL_PORT, JOINT5_HALL_PORT
+};
+static uint16_t joint_hall_pin[NUM_JOINTS] = {
+    JOINT0_HALL_PIN, JOINT1_HALL_PIN, JOINT2_HALL_PIN,
+    JOINT3_HALL_PIN, JOINT4_HALL_PIN, JOINT5_HALL_PIN
+};
+static const float joint_homing_max_deg[NUM_JOINTS] = {
+    JOINT0_HOMING_MAX_DEG, JOINT1_HOMING_MAX_DEG, JOINT2_HOMING_MAX_DEG,
+    JOINT3_HOMING_MAX_DEG, JOINT4_HOMING_MAX_DEG, JOINT5_HOMING_MAX_DEG
+};
+
+static uint32_t Joint_DegToSteps(uint8_t joint, float deg){
+    float steps_per_output_rev = MOTOR_FULL_STEPS_PER_REV
+                                * (float)joint_cfg[joint].microsteps
+                                * joint_cfg[joint].gear_ratio;
+    return (uint32_t)(fabsf(deg) / 360.0f * steps_per_output_rev);
+}
+
+uint8_t Homing_Joint(uint8_t joint, int8_t search_dir){
+    if (joint >= NUM_JOINTS || !joint_cfg[joint].configured){
+    	return 0;
+    }
+
+    uint32_t max_steps = Joint_DegToSteps(joint, joint_homing_max_deg[joint]);
+    joint_limit_hit[joint] = 0;
+    homing_in_progress = 1;
+
+    int8_t dir = search_dir;
+
+    for (uint8_t attempt = 0; attempt < 2; attempt++){
+        int32_t start_pos = Joint_GetPosition(joint);
+        uint8_t hall_prev = HAL_GPIO_ReadPin(joint_hall_port[joint], joint_hall_pin[joint]);
+        int32_t rise_pos = 0, fall_pos = 0;
+        uint8_t saw_rise = 0, saw_fall = 0;
+
+        Joint_SetDirection(joint, dir > 0 ? 1 : 0);
+        Joint_SetStepFrequency(joint, HOMING_SPEED_HZ);
+        Joint_Run(joint, 1);
+
+        while (1){
+            if (joint_limit_hit[joint]){
+                joint_limit_hit[joint] = 0;
+                break; // hit a limit before finding the magnet on this pass
+            }
+
+            // GPIO_PIN_RESET = magnet present
+            uint8_t hall_now = HAL_GPIO_ReadPin(joint_hall_port[joint], joint_hall_pin[joint]);
+            if (!saw_rise && hall_now != hall_prev && hall_now == GPIO_PIN_RESET){
+                rise_pos = Joint_GetPosition(joint);
+                saw_rise = 1;
+            } else if (saw_rise && !saw_fall && hall_now != hall_prev && hall_now == GPIO_PIN_SET){
+                fall_pos = Joint_GetPosition(joint);
+                saw_fall = 1;
+                Joint_Run(joint, 0);
+                break; // found both edges
+            }
+            hall_prev = hall_now;
+
+            int32_t traveled = Joint_GetPosition(joint) - start_pos;
+            if ((uint32_t)(traveled < 0 ? -traveled : traveled) > max_steps){
+                Joint_Run(joint, 0);
+                homing_in_progress = 0;
+                return 0; // no magnet found within the expected travel range - real fault
+            }
+        }
+
+        if (saw_fall){
+            int32_t midpoint = (rise_pos + fall_pos) / 2;
+            joint_position[joint] -= midpoint; // Joint_Run(joint,0) above already reconciled the
+                                                // hardware count into joint_position, so this is
+                                                // a plain baseline shift, not a live read
+            homing_in_progress = 0;
+            return 1;
+        }
+
+        dir = -dir; // limit hit before the magnet - try the opposite direction once
+    }
+
+    homing_in_progress = 0;
+    return 0; // searched both directions, never found the magnet
+}
+
+// Homing order and initial search direction per joint.
+static const uint8_t homing_order[NUM_JOINTS]      = {0, 1, 2, 3, 4, 5};
+static const int8_t  homing_search_dir[NUM_JOINTS] = {1, 1, 1, 1, 1, 1};
+
+// Ready/idle stance to move to once every joint is homed, in output-shaft degrees
+// from each joint's now-zeroed home position.
+static const float idle_stance_deg[NUM_JOINTS] = {0, 0, 0, 0, 0, 0};
+
+// Homes every joint in sequence, then moves to the idle stance.
+uint8_t Robot_HomeAll(void){
+    for (uint8_t i = 0; i < NUM_JOINTS; i++){
+        uint8_t joint = homing_order[i];
+        if (!joint_cfg[joint].configured){
+        	continue;
+        }
+
+        if (!Homing_Joint(joint, homing_search_dir[joint])){
+            return 0; // one joint failed - stop the whole sequence rather than guess
+        }
+    }
+
+    for (uint8_t j = 0; j < NUM_JOINTS; j++){
+        if (!joint_cfg[j].configured || idle_stance_deg[j] == 0.0f){
+        	continue;
+        }
+        // TODO: placeholder move - replace with real position control
+        Joint_MoveAtSpeed(j, idle_stance_deg[j] > 0 ? 30.0f : -30.0f);
+        HAL_Delay(500);
+        Joint_Run(j, 0);
+    }
+
+    return 1;
+}
+// HOMING END
+
 
 // TMC2209 UART
 static UART_HandleTypeDef *tmc_uart_bus[3] = { NULL, &huart1, NULL }; // [1]=bus1, [2]=bus2, [0] unused
@@ -597,21 +810,42 @@ int main(void)
   MX_TIM4_Init();
   MX_TIM2_Init();
   MX_USART1_UART_Init();
+  MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
   // SERVO BEGIN
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
   Set_Servo_Angle(&htim4, TIM_CHANNEL_2, 0);
   //SERVO END
 
-  TMC2209_ConfigJoint(5);          // set 1/256 microstepping, SpreadCycle, run current for joint 5
+  TMC2209_ConfigJoint(5);
 //  HAL_Delay(10);                   // let the driver settle before reading back
 //  if (!TMC2209_VerifyJoint(5)){
 //	Driver_ConfigFailBlink();    // config read-back failed or didn't match - PA5 blinks fast forever
 //  }
 
-  Joint_Enable(1);                  // pulls shared EN low -> all drivers enabled
-  Joint_SetDirection(5, 1);         // joint 5: pick a direction to start; flip to 0 to reverse
-  Joint_Run(5, 1);                  // starts STEP pulses on joint 5's timer -> motor spins continuously
+  Joint_Enable(1);
+  Joint_SetDirection(5, 1);
+  Joint_SetStepFrequency(5, 1000);
+  Joint_Run(5, 1);
+
+
+//  // HOMING TEST - joint 5 only, hall-only (no limit switch involved for this joint)
+//  uint8_t joint5_homed = Homing_Joint(5, 1);   // try direction 1 first; flip to -1 if it searches the wrong way
+//  if (joint5_homed){
+//		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET); // solid ON = homing succeeded
+//  } else {
+//	Driver_ConfigFailBlink(); // fast blink forever = homing failed (never found the magnet)
+//  }
+
+//  Homing_Joint(5, 1);
+
+//  // HOMING TEST - joint 5 only, hall-only (no limit switch involved for this joint)
+//  uint8_t joint5_homed = Homing_Joint(5, 1);   // try direction 1 first; flip to -1 if it searches the wrong way
+//  if (joint5_homed){
+//		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET); // solid ON = homing succeeded
+//  } else {
+//	Driver_ConfigFailBlink(); // fast blink forever = homing failed (never found the magnet)
+//  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -621,6 +855,44 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+
+
+	#define HALL_FILTER_MAX     1000   // how much "evidence" accumulates before trusting a state
+	#define HALL_FILTER_HIGH   	900   // confirm "magnet present" once counter climbs this high
+	#define HALL_FILTER_LOW     100    // confirm "magnet absent" once counter drops this low
+	// (the gap between HIGH and LOW is a hysteresis band - once confirmed, stays confirmed
+	// until the counter swings decisively the other way, so it doesn't chatter right at the edge)
+
+	static int32_t hall_filter = 500; // start neutral, mid-range
+	static uint8_t hall_confirmed_present = 0;
+
+	uint8_t hall_now = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
+	if (hall_now == GPIO_PIN_RESET){          // this sample says "magnet"
+		if (hall_filter < HALL_FILTER_MAX) hall_filter++;
+	} else {                                   // this sample says "no magnet"
+		if (hall_filter > 0) hall_filter--;
+	}
+
+	if (hall_filter >= HALL_FILTER_HIGH) hall_confirmed_present = 1;
+	else if (hall_filter <= HALL_FILTER_LOW) hall_confirmed_present = 0;
+	// else: leave hall_confirmed_present exactly as it was - genuinely undecided zone
+
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, hall_confirmed_present ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 //	// SERVO BEGIN
 //	Set_Servo_Angle(&htim4, TIM_CHANNEL_2, 0);
 //	HAL_Delay(1000);
@@ -640,13 +912,13 @@ int main(void)
 //	}
 //	// LIMIT SWITCH END
 //
-//	// HALL EFFECT BEGIN
+	// HALL EFFECT BEGIN
 //	if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13) == GPIO_PIN_RESET){
 //		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 //	} else{
 //		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
 //	}
-//	// HALL EFFECT END
+	// HALL EFFECT END
   }
   /* USER CODE END 3 */
 }
@@ -742,8 +1014,8 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_ENABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
@@ -819,6 +1091,52 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 2 */
   HAL_TIM_MspPostInit(&htim4);
+
+}
+
+/**
+  * @brief TIM5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM5_Init(void)
+{
+
+  /* USER CODE BEGIN TIM5_Init 0 */
+
+  /* USER CODE END TIM5_Init 0 */
+
+  TIM_SlaveConfigTypeDef sSlaveConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM5_Init 1 */
+
+  /* USER CODE END TIM5_Init 1 */
+  htim5.Instance = TIM5;
+  htim5.Init.Prescaler = 0;
+  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim5.Init.Period = 4294967295;
+  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sSlaveConfig.SlaveMode = TIM_SLAVEMODE_EXTERNAL1;
+  sSlaveConfig.InputTrigger = TIM_TS_ITR1;
+  if (HAL_TIM_SlaveConfigSynchro(&htim5, &sSlaveConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM5_Init 2 */
+
+  /* USER CODE END TIM5_Init 2 */
 
 }
 
